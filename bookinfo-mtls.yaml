@@ -402,21 +402,6 @@ spec:
   mtls:
     mode: STRICT
 ---
-# Source: bookinfo-citrix-ingress/templates/bookinfo_policy_istio_mutual.yaml
-apiVersion: "authentication.istio.io/v1alpha1"
-kind: "Policy"
-metadata:
-  name: bookinfo-policy
-  namespace: bookinfo
-spec:
-  targets:
-  - name: reviews
-  - name: productpage
-  - name: ratings
-  - name: details
-  peers:
-  - mtls: {}
----
 # Source: bookinfo-citrix-ingress/templates/productpage_vs.yaml
 apiVersion: networking.istio.io/v1alpha3
 kind: VirtualService
