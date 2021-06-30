@@ -1,0 +1,248 @@
+---
+# Source: citrix-adc-istio-ingress-gateway/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+    name: nslogin
+    namespace: citrix-system
+type: Opaque
+data:
+    username: "bnNyb290"
+    password: "bnNyb290"
+---
+# Source: citrix-adc-istio-ingress-gateway/templates/ingressgateway-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: citrix-ingressgateway
+  namespace: citrix-system
+  annotations:
+  labels:
+    app: citrix-ingressgateway
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 52.140.41.135
+  selector:
+    app: citrix-ingressgateway
+  ports:
+    -
+      name: http2
+      nodePort: 30180
+      port: 80
+      targetPort: 80
+    -
+      name: https
+      nodePort: 31443
+      port: 443
+      targetPort: 443
+---
+# Source: citrix-adc-istio-ingress-gateway/templates/metrics-exporter-service.yaml
+kind: Service
+apiVersion: v1
+metadata:
+   name: exporter
+   annotations:
+   labels:
+     service-type: citrix-adc-monitor
+spec:
+   selector:
+     app: citrix-ingressgateway
+   ports:
+   - name: exporter-port
+     port: 8888
+     targetPort: 8888
+---
+# Source: citrix-adc-istio-ingress-gateway/templates/citrix-adc-ingressgateway-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: citrix-ingressgateway
+  namespace: citrix-system
+  labels:
+    app: citrix-ingressgateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: citrix-ingressgateway
+  template:
+    metadata:
+      labels:
+        app: citrix-ingressgateway
+      annotations:
+        scheduler.alpha.kubernetes.io/critical-pod: ""
+        prometheus.io/port: "8888"
+        prometheus.io/scrape: "true"
+    spec:
+      volumes:
+      - name: nslogin
+        secret:
+          secretName: nslogin
+      - name: citrix-ingressgateway-certs
+        secret:
+          optional: true
+          secretName: "citrix-ingressgateway-certs" # IMPORTANT: This secret MUST BE created before deploying gateway and ingress-gateway
+      - name: citrix-ingressgateway-ca-certs
+        secret:
+          optional: true
+          secretName: "citrix-ingressgateway-ca-certs" # IMPORTANT: This secret MUST BE created before deploying gateway and ingress-gateway
+      - name: cpx-conf
+        emptyDir: {}
+      - name: cpx-crash
+        emptyDir: {}
+      - name: cpx-pwd
+        emptyDir: {}
+      - name: certs
+        emptyDir: {}
+      - name: istiod-ca-cert
+        configMap:
+          defaultMode: 0777
+          name: istio-ca-root-cert
+      containers:
+        - name: exporter
+          image: quay.io/citrix/citrix-adc-metrics-exporter:1.4.6
+          imagePullPolicy: IfNotPresent
+          args:
+          - "--target-nsip=127.0.0.1"
+          - "--port=8888"
+          - "--log-level=ERROR"
+          - "--secure=false"
+          securityContext:
+            readOnlyRootFilesystem: true
+          volumeMounts:
+          - name: nslogin
+            mountPath: "/mnt/nslogin"
+            readOnly: true
+        - name: istio-adaptor
+          image: quay.io/citrix/citrix-xds-adaptor:0.9.5 #xds-adaptor:0.9.5
+          imagePullPolicy: IfNotPresent 
+          args:
+          - -ads-server
+          - istiod-basic.istio-system.svc:15012 # istiod.istio-system.svc:15012
+          - -istio-proxy-type
+          - "router"
+          - -ads-secure-connect=true
+          - -citrix-adc
+          - "http://127.0.0.1"
+          - -citrix-adc-vip
+          - "nsip"
+          - -citrix-adc-password
+          - "/var/deviceinfo/random_id"
+          env:
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: INSTANCE_IP
+            valueFrom:
+              fieldRef:
+               fieldPath: status.podIP
+          - name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+          - name: APPLICATION_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['app']
+          - name: SERVICE_ACCOUNT
+            valueFrom:
+              fieldRef:
+                apiVersion: v1
+                fieldPath: spec.serviceAccountName
+          - name: CA_ADDR
+            value: istiod-basic.istio-system.svc:15012 #istiod.istio-system.svc:15012
+          - name: TRUST_DOMAIN
+            value: cluster.local #cluster.local
+          - name: CLUSTER_ID 
+            value: Kubernetes #Kubernetes
+          - name: CERT_TTL_IN_HOURS 
+            value: "720"
+          - name: NS_USER
+            valueFrom:
+              secretKeyRef:
+                name: nslogin
+                key: username
+          - name: NS_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: nslogin
+                key: password
+          securityContext:
+            readOnlyRootFilesystem: true
+            runAsUser: 32024 # UID of istio-adaptor container's user
+          volumeMounts:
+          - mountPath: /var/deviceinfo
+            name: cpx-pwd
+          - mountPath: /etc/certs
+            name: certs
+          - name: istiod-ca-cert
+            mountPath: /etc/rootcert/
+          - mountPath: /etc/nslogin 
+            name: nslogin
+            readOnly: true
+          - mountPath: /etc/istio/ingressgateway-certs # Make sure that Gateway definition has this path mentioned in server.tls section for SIMPLE TLS
+            name: citrix-ingressgateway-certs
+            readOnly: true
+          - mountPath: /etc/istio/ingressgateway-ca-certs # Make sure that Gateway definition has this path mentioned in server.tls section for MUTUAL TLS
+            name: citrix-ingressgateway-ca-certs
+            readOnly: true
+        - name: citrix-ingressgateway
+          image: "quay.io/citrix/citrix-k8s-cpx-ingress:13.0-58.30"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          ports:
+            - containerPort: 80
+            - containerPort: 443
+            - containerPort: 10080
+            - containerPort: 10443
+          volumeMounts:
+          - mountPath: /cpx/conf/
+            name: cpx-conf
+          - mountPath: /cpx/crash/
+            name: cpx-crash
+          - mountPath: /var/deviceinfo
+            name: cpx-pwd
+          env:
+          - name: "EULA"
+            value: "YES"
+          - name: "MGMT_HTTP_PORT"
+            value: "10080"
+          - name: "MGMT_HTTPS_PORT"
+            value: "10443"
+          - name: "NS_CPX_LITE"
+            value: "1"
+          - name: "KUBERNETES_TASK_ID"
+            value: ""
+          - name: "LS_IP"
+            value:  
+          - name: "LS_PORT"
+            value: "27000"
+          - name: "LOGSTREAM_COLLECTOR_IP"
+            value:  
+#To povision bandwidth based licensing to Citrix ADC CPX from ADM, needs bandwidth
+#for multiple-PE support, need to set CPX_CORES
+---
+# Source: citrix-adc-istio-ingress-gateway/templates/ingressgateway-service.yaml
+apiVersion: autoscaling/v2beta1
+kind: HorizontalPodAutoscaler
+metadata:
+    name: citrix-ingressgateway
+    namespace: citrix-system
+spec:
+    maxReplicas: 1
+    minReplicas: 1
+    scaleTargetRef:
+      apiVersion: apps/v1
+      kind: Deployment
+      name: citrix-ingressgateway
+    metrics:
+      - type: Resource
+        resource:
+          name: cpu
+          targetAverageUtilization: 60
